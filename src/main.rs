@@ -1,4 +1,4 @@
-use iced::{widget::{container,text_editor}, Element, Sandbox, Settings};
+use iced::{widget::{container,text_editor, text, column, row, horizontal_space}, Element, Sandbox, Settings, Theme, Length};
 
 fn main() -> iced::Result {
     Editor::run(Settings::default())
@@ -18,7 +18,7 @@ impl Sandbox for Editor {
 
     fn new() -> Self {
         Self {
-            content : text_editor::Content::new(),
+            content : text_editor::Content::with(include_str!("main.rs")),
         }
     }
 
@@ -36,7 +36,17 @@ impl Sandbox for Editor {
     
     fn view(&self) -> Element<'_, Message> {
         let input = text_editor(&self.content).on_edit(Message::Edit);
-        container(input).padding(10).into()
+        let position = {
+            let (line, column) = self.content.cursor_position();
+            text(format!("{}:{}", line + 1, column + 1))
+        };
+
+        let status_bar = row![horizontal_space(Length::Fill), position];
+        container(column![input, status_bar]).padding(10).into()
+    }
+
+    fn theme(&self) -> Theme {
+        Theme::Dark
     }
 
 }
