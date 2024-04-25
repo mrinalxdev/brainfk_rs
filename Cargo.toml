@@ -8,3 +8,4 @@ version = "0.1.0"
 [dependencies]
 iced = {git = "https://github.com/iced-rs/iced.git", rev = "refs/tags/text-editor", features = ["debug"]}
 tokio = {version = "1", features = ["fs"]}
+rfd = "0.12"
