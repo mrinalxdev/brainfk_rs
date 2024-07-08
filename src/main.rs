@@ -1,114 +1,148 @@
-use std::io::{ ErrorKind};
-use std::path::Path;
-use std::sync::Arc;
+use anyhow::Ok;
+use anyhow::{Context, Result};
+use std::env;
+// use std::fmt::format;
+use std::fs::File;
+use std::io::{BufReader, Read};
+use std::process;
 
-use iced::{
-    executor,
-    widget::{button, column, container, horizontal_space, row, text, text_editor},
-    Application, Command, Element, Length, Settings, Theme,
-};
-
-fn main() -> iced::Result {
-    Editor::run(Settings::default())
+struct Lexer<R: Read> {
+    source: R,
+    location: Location,
+    nxt_token: Option<Token>,
 }
 
-struct Editor {
-    content: text_editor::Content,
-    error: Option<Error>,
+#[derive(Debug, Copy, Clone)]
+struct Location {
+    line: usize,
+    column: usize,
 }
 
-#[derive(Debug, Clone)]
-enum Message {
-    Edit(text_editor::Action),
-    Open,
-    FileOpened(Result<Arc<String>, Error>),
-}
-
-impl Application for Editor {
-    type Message = Message;
-
-    type Theme = Theme; //For a different theme for the application, we have used the built in Theme for this application
-    type Executor = executor::Default;
-    type Flags = (); // represents the data which needs to be initalized in an application.
-
-    fn new(_flags: Self::Flags) -> (Self, Command<Message>) {
-        (
-            Self {
-                content: text_editor::Content::new(),
-                error: None,
-            },
-            Command::perform(
-                load_file(format!("{}/src/main.rs", env!("CARGO_MANIFEST_DIR"))),
-                Message::FileOpened,
-            ),
-        )
+impl Default for Location {
+    fn default() -> Self {
+        Self { line: 1, column: 1 }
     }
+}
 
-    fn title(&self) -> String {
-        String::from("TextFlow : txt editor built by @Mrinal")
-    }
+#[derive(Debug, Clone, Copy)]
+struct Token {
+    char: char,
+    location: Location,
+}
 
-    fn update(&mut self, message: Message) -> Command<Message> {
-        match message {
-            Message::Edit(action) => {
-                self.content.edit(action);
-        Command::none()
+enum Operation {
+    AddressRight,
+    AddressLeft,
+    Inc,
+    Dec,
+    Output,
+    Input,
+    JmpForward,
+    JmpBackward,
+}
 
-            }
-            Message::Open => {
-                let _ = Command::perform(pick_file(), Message::FileOpened);
-        Command::none()
-            }
-            Message::FileOpened(Ok(content)) => {
-                self.content = text_editor::Content::with(&content);
-        Command::none()
-
-            }
-            Message::FileOpened(Err(error)) => {
-                self.error = Some(error);
-        Command::none()
-
-            }
+impl<R> Lexer<R>
+where
+    R: Read,
+{
+    fn new(source: R) -> Self {
+        Self {
+            source,
+            location: Location::default(),
+            nxt_token: None,
         }
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        let controls = row![button("Open").on_press(Message::Open)];
-        let input = text_editor(&self.content).on_edit(Message::Edit);
-        let position = {
-            let (line, column) = self.content.cursor_position();
-            text(format!("{}:{}", line + 1, column + 1))
-        };
+    fn is_char_in_language(candidate: char) -> bool {
+        let lang_chars = "<>+-.,[]";
 
-        let status_bar = row![horizontal_space(Length::Fill), position];
-        container(column![controls, input, status_bar]).padding(10).into()
+        for char in lang_chars.chars() {
+            if char == candidate {
+                return true;
+            }
+        }
+
+        return false;
     }
 
-    fn theme(&self) -> Theme {
-        Theme::Dark
+    fn slice_token(&mut self) -> Result<Option<Token>> {
+        if self.nxt_token.is_some() {
+            let token = self.nxt_token.take().expect("peeked token to be available");
+            return Ok(Some(token));
+        }
+
+        let mut buf: [u8; 1] = [0; 1];
+        let mut location: Location = self.location;
+
+        while !Self::is_char_in_language(buf[0].into()) {
+            location = self.location;
+            let read_bytes = self
+                .source
+                .read(&mut buf)
+                .context("read next byte from source")?;
+
+            if read_bytes != 1 {
+                return Ok(None);
+            }
+            self.location.column += 1;
+            if buf[0] == '\n' as u8 {
+                self.location.column = 1;
+                self.location.line += 1;
+            }
+        }
+
+        Ok(Some(Token {
+            char: buf[0].into(),
+            location,
+        }))
+        // todo!("create token")
+    }
+
+    fn nxt_token(&mut self) -> Result<Option<Token>> {
+        if let Some(token) = self.nxt_token {
+            return Ok(Some(token));
+        }
+
+        self.nxt_token = self
+            .slice_token()
+            .context("reading next token to peek at it")?;
+        Ok(self.nxt_token)
     }
 }
 
-async fn pick_file() -> Result<Arc<String>, Error> {
-    let handle = rfd::AsyncFileDialog::new()
-        .set_title("Choose a text file ...")
-        .pick_file()
-        .await
-        .ok_or(Error::DialogClosed)?;
+fn main() -> Result<()> {
+    let args = env::args().collect::<Vec<String>>();
+    let (command, args) = args
+        .split_first()
+        .expect("expected to have at least the command in the args array");
 
-    load_file(handle.path()).await
-}
+    if args.len() < 1 {
+        eprintln!("Usage : ");
+        eprintln!("{command} <brainfuck_file>");
+        process::exit(1);
+    }
 
-async fn load_file(path: impl AsRef<Path>) -> Result<Arc<String>, Error> {
-    tokio::fs::read_to_string(path)
-        .await
-        .map(Arc::new)
-        .map_err(|error| error.kind())
-        .map_err(|_arg0: ErrorKind| Error::IO)
-}
+    let input = &args[0];
 
-#[derive(Debug, Clone)]
-enum Error {
-    DialogClosed,
-    IO,
+    println!("Opening brainfuck file {input} for execution");
+
+    let reader = BufReader::new(
+        File::open(input).with_context(|| format!("open file {input} for reading"))?,
+    );
+    let mut lexer = Lexer::new(reader);
+
+    let nxt_token = lexer.nxt_token()?;
+    println!("Peeked token {nxt_token:?} ");
+    let slice_token = lexer.slice_token()?;
+    println!("Sliced token {slice_token:?}");
+    let slice_token = lexer.slice_token()?;
+    println!("Sliced token {slice_token:?}");
+
+    // while let Some(token) = lexer.slice_token().context(format!("read next token"))? {
+    //     println!("{token:?}");
+    // }
+
+    println!(" ");
+
+    Ok(())
 }
