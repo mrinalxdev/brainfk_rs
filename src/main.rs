@@ -1,9 +1,9 @@
-use anyhow::Ok;
+use anyhow::{anyhow, Ok};
 use anyhow::{Context, Result};
 use std::env;
 // use std::fmt::format;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::process;
 
 struct Lexer<R: Read> {
@@ -30,15 +30,16 @@ struct Token {
     location: Location,
 }
 
-enum Operation {
-    AddressRight,
-    AddressLeft,
-    Inc,
-    Dec,
-    Output,
-    Input,
-    JmpForward,
-    JmpBackward,
+#[derive(Debug, Clone)]
+enum Instruction {
+    AddressRight(usize),
+    AddressLeft(usize),
+    Inc(u8),
+    Dec(u8),
+    Output(usize),
+    Input(usize),
+    JmpForward(usize),
+    JmpBackward(usize),
 }
 
 impl<R> Lexer<R>
@@ -108,6 +109,151 @@ where
             .context("reading next token to peek at it")?;
         Ok(self.nxt_token)
     }
+
+    fn count_while(&mut self, token: &Token) -> Result<usize> {
+        let mut count: usize = 0;
+        while let Some(candidate) = self.nxt_token()? {
+            if candidate.char == token.char {
+                let _ = self.slice_token();
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        Ok(count)
+    }
+}
+
+type Program = Vec<Instruction>;
+
+#[derive(Default)]
+struct Parser {
+    forward_jmps: Vec<usize>,
+    program: Program,
+}
+
+impl Parser {
+    fn parse_instruction<R: Read>(
+        &mut self,
+        lexer: &mut Lexer<R>,
+        token: &Token,
+    ) -> Result<Instruction> {
+        match token {
+            Token { char: '<', .. } => Ok(Instruction::AddressLeft(1 + lexer.count_while(&token)?)),
+            Token { char: '>', .. } => Ok(Instruction::AddressRight(1 + lexer.count_while(token)?)),
+            Token { char: '[', .. } => {
+                self.forward_jmps.push(self.program.len()); //This will locate the actual Instruction stream
+
+                //Position will be backpatched once encountering the JmpBack..
+                Ok(Instruction::JmpForward(0))
+            }
+            Token {
+                char: ']',
+                location: Location { line, column },
+            } => {
+                if let Some(target) = self.forward_jmps.pop() {
+                    self.program[target] = Instruction::JmpForward(self.program.len());
+                    return Ok(Instruction::JmpBackward(target + 1));
+                } else {
+                    return Err(anyhow!(
+                        "Could not find corresponding jump for ] at {line}:{column}"
+                    ));
+                }
+            }
+            Token { char: ',', .. } => Ok(Instruction::Input(1 + lexer.count_while(token)?)),
+            Token { char: '.', .. } => Ok(Instruction::Output(1 + lexer.count_while(token)?)),
+            Token { char: '-', .. } => Ok(Instruction::Dec(
+                ((1 + lexer.count_while(token)?) % 255) as u8,
+            )),
+            Token { char: '+', .. } => Ok(Instruction::Inc(
+                ((1 + lexer.count_while(token)?) % 255) as u8,
+            )),
+            _ => unreachable!("No other token defined set is expected"),
+        }
+    }
+
+    fn parse_program<R: Read>(&mut self, lexer: &mut Lexer<R>) -> Result<Program> {
+        // let mut program = vec![];
+        self.program = vec![];
+        self.forward_jmps = vec![];
+        while let Some(token) = lexer.slice_token()? {
+            let instruction = self.parse_instruction(lexer, &token)?;
+            self.program.push(instruction)
+        }
+        Ok(self.program.clone())
+    }
+}
+
+struct Interpreter {
+    program: Program,
+    memory: Vec<u8>,
+    addr: usize,
+    instruction_ptr: usize,
+}
+
+impl Interpreter {
+    fn new(program: Program) -> Self {
+        Self {
+            program,
+            memory: vec![0; 64000],
+            addr: 0,
+            instruction_ptr: 0,
+        }
+    }
+    fn run(&mut self) -> Result<()> {
+        while self.instruction_ptr < self.program.len() {
+            // println!(
+            //     "{ip} : {instruction:?}",
+            //     ip = self.instruction_ptr,
+            //     instruction = self.program[self.instruction_ptr]
+            // );
+            // break;
+            match self.program[self.instruction_ptr] {
+                Instruction::AddressRight(count) => {
+                    self.addr += count;
+                    self.instruction_ptr += 1;
+                }
+                Instruction::AddressLeft(count) => {
+                    self.addr -= count;
+                    self.instruction_ptr += 1;
+                }
+                Instruction::Inc(count) => {
+                    self.memory[self.addr] = self.memory[self.addr].wrapping_add(count);
+                    self.instruction_ptr += 1;
+                }
+                Instruction::Dec(count) => {
+                    self.memory[self.addr] = self.memory[self.addr].wrapping_sub(count);
+                    self.instruction_ptr += 1;
+                }
+                Instruction::Output(count) => {
+                    let mut stdout = std::io::stdout();
+                    for _ in 0..count {
+                        stdout
+                            .write(&self.memory[self.addr..self.addr + 1])
+                            .context("writing data to stdout")?;
+                    }
+                    stdout.flush().context("Flushing stdout output")?;
+                    self.instruction_ptr += 1;
+                }
+                Instruction::Input(_count) => todo!(),
+                Instruction::JmpForward(target) => {
+                    if self.memory[self.addr] == 0 {
+                        self.instruction_ptr = target;
+                    } else {
+                        self.instruction_ptr += 1;
+                    }
+                }
+                Instruction::JmpBackward(target) => {
+                    if self.memory[self.addr] != 0 {
+                        self.instruction_ptr = target;
+                    } else {
+                        self.instruction_ptr += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn main() -> Result<()> {
@@ -131,18 +277,12 @@ fn main() -> Result<()> {
     );
     let mut lexer = Lexer::new(reader);
 
-    let nxt_token = lexer.nxt_token()?;
-    println!("Peeked token {nxt_token:?} ");
-    let slice_token = lexer.slice_token()?;
-    println!("Sliced token {slice_token:?}");
-    let slice_token = lexer.slice_token()?;
-    println!("Sliced token {slice_token:?}");
+    let mut parser = Parser::default();
 
-    // while let Some(token) = lexer.slice_token().context(format!("read next token"))? {
-    //     println!("{token:?}");
-    // }
-
-    println!(" ");
+    //creating the parser
+    let program = parser.parse_program(&mut lexer)?;
+    let mut interpreter = Interpreter::new(program);
+    interpreter.run()?;
 
     Ok(())
 }
